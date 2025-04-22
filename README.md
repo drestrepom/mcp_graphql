@@ -1,10 +1,10 @@
 # MCP GraphQL
 
-An MCP (Model Control Protocol) server that enables interaction with GraphQL APIs.
+An MCP (Model Context Protocol) server that enables interaction with GraphQL APIs.
 
 ## Description
 
-MCP GraphQL is a tool that implements the Model Control Protocol (MCP) to provide a standardized interface for interacting with GraphQL APIs. It automatically exposes each GraphQL query as a separate MCP tool, allowing MCP-compatible clients to seamlessly communicate with GraphQL services.
+MCP GraphQL is a tool that implements the Model Context Protocol (MCP) to provide a standardized interface for interacting with GraphQL APIs. It automatically exposes each GraphQL query as a separate MCP tool, allowing MCP-compatible clients to seamlessly communicate with GraphQL services.
 
 ## Features
 
@@ -22,11 +22,22 @@ MCP GraphQL is a tool that implements the Model Control Protocol (MCP) to provid
 
 ## Installation
 
-```bash
-# Using pip
-pip install mcp_graphql
+### Using uv (recommended)
 
-# Or installation from source code
+When using [`uv`](https://docs.astral.sh/uv/) no specific installation is needed. We will
+use [`uvx`](https://docs.astral.sh/uv/guides/tools/) to directly run *mcp-graphql*.
+
+### Using pip
+
+Alternatively you can install `mcp-graphql` via pip:
+
+```bash
+pip install mcp-graphql
+```
+
+### Installation from source code
+
+```bash
 git clone https://github.com/your-username/mcp_graphql.git
 cd mcp_graphql
 pip install .
@@ -36,8 +47,18 @@ pip install .
 
 ### As a command line tool
 
+Using uvx:
+```bash
+uvx mcp-graphql --api-url="https://api.example.com/graphql" --auth-token="your-token"
+```
+
+Using pip installation:
 ```bash
 mcp-graphql --api-url="https://api.example.com/graphql" --auth-token="your-token"
+```
+or
+```bash
+python -m mcp_graphql --api-url="https://api.example.com/graphql" --auth-token="your-token"
 ```
 
 ### Available options
@@ -65,6 +86,51 @@ api_url = "https://api.example.com/graphql"
 asyncio.run(serve(api_url, auth_headers))
 ```
 
+## Configuration
+
+### Configure for Claude.app
+
+Add to your Claude settings:
+
+<details>
+<summary>Using uvx</summary>
+
+```json
+"mcpServers": {
+  "graphql": {
+    "command": "uvx",
+    "args": ["mcp-graphql", "--api-url", "https://api.example.com/graphql"]
+  }
+}
+```
+</details>
+
+<details>
+<summary>Using docker</summary>
+
+```json
+"mcpServers": {
+  "graphql": {
+    "command": "docker",
+    "args": ["run", "-i", "--rm", "mcp/graphql", "--api-url", "https://api.example.com/graphql"]
+  }
+}
+```
+</details>
+
+<details>
+<summary>Using pip installation</summary>
+
+```json
+"mcpServers": {
+  "graphql": {
+    "command": "python",
+    "args": ["-m", "mcp_graphql", "--api-url", "https://api.example.com/graphql"]
+  }
+}
+```
+</details>
+
 ## How It Works
 
 MCP GraphQL automatically:
@@ -83,25 +149,18 @@ When a tool is called, the server:
 
 - Support for GraphQL mutations (with appropriate safeguards)
 - Improved error handling and validation
-- Pagination support for large result sets
+- Additional optimizations based on specific GraphQL API implementations
 
 ## Development
 
 ### Setting up the development environment
 
 ```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+# Create virtual environment using uv
+uv venv
 
-# Install development dependencies
-pip install -e ".[dev]"
-```
-
-### Running tests
-
-```bash
-pytest
+# Install dependencies
+uv sync
 ```
 
 ### Linting
@@ -112,7 +171,7 @@ ruff check .
 
 ## License
 
-[Include license information here]
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
