@@ -1,17 +1,26 @@
 import asyncio
-import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import json
 from logging import INFO, basicConfig, getLogger
+from typing import TYPE_CHECKING
 
+from graphql import GraphQLInputType, GraphQLList, GraphQLNonNull, GraphQLScalarType, print_ast
 import mcp
+from gql import Client
+from gql.dsl import DSLField, DSLQuery, DSLSchema, dsl_gql, DSLType, GraphQLObjectType
+from gql.transport.aiohttp import AIOHTTPTransport
 from mcp.server import Server
-from mcp.server.lowlevel import NotificationOptions, Server
+from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
+from mcp.types import Tool
 from mcp.types import TextContent, Tool
-from pydantic import TypeAdapter
+import mcp.types as types
+import functools
+from functools import partial
 
-from mcp_graphql.api_types import Query
+if TYPE_CHECKING:
+    from graphql import GraphQLArgumentMap, GraphQLField
 
 # Configurar logging
 basicConfig(
@@ -22,149 +31,320 @@ logger = getLogger(__name__)
 
 
 @asynccontextmanager
-async def server_lifespan(server: Server) -> AsyncIterator[dict]:
+async def server_lifespan(server: Server, api_url: str, auth_headers: dict) -> AsyncIterator[dict]:
     """Manage server startup and shutdown lifecycle."""
-    yield {}
+    # Initialize resources on startup
+    transport = AIOHTTPTransport(url=api_url, headers=auth_headers)
+    client = Client(transport=transport, fetch_schema_from_transport=True)
+    # Use the client directly instead of trying to use session as a context manager
+    async with client as session:
+        try:
+            yield {"session": session, "dsl_schema": DSLSchema(session.client.schema)}
+        finally:
+            # No need for manual __aexit__ call - it's handled by the async with
+            pass
 
 
-server = Server("example-server")
+def convert_type_to_json_schema(
+    gql_type: GraphQLInputType, max_depth: int = 3, current_depth: int = 1
+):
+    """
+    Convert GraphQL type to JSON Schema, handling complex nested types properly.
+    Supports max_depth to prevent infinite recursion with circular references.
+    """
+    # Check max depth to prevent infinite recursion
+    if current_depth > max_depth:
+        return {"type": "object", "description": "Max depth reached"}
 
+    # Handle Non-Null types
+    if isinstance(gql_type, GraphQLNonNull):
+        inner_schema = convert_type_to_json_schema(gql_type.of_type, max_depth, current_depth)
+        # Mark this as required via the flag (will be processed by the caller)
+        inner_schema["required"] = True
+        return inner_schema
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    tools = []
-    # Get all methods from Query class that have an 'args' parameter
-    for query_name, method in inspect.getmembers(Query, predicate=inspect.isfunction):
-        if query_name.startswith("_"):
-            continue
+    # Handle List types
+    if isinstance(gql_type, GraphQLList):
+        inner_schema = convert_type_to_json_schema(gql_type.of_type, max_depth, current_depth)
+        return {"type": "array", "items": inner_schema}
 
-        # Get the method signature
-        sig = inspect.signature(method)
-        if "args" in sig.parameters:
-            # Get the type annotation for args
-            args_type = sig.parameters["args"].annotation
-            # Get JSON schema from Pydantic model
-            schema = TypeAdapter(args_type).json_schema()
+    # Handle scalar types based on name
+    if isinstance(gql_type, GraphQLScalarType):
+        type_name = str(gql_type).lower()
+        if type_name == "string":
+            return {"type": "string"}
+        elif type_name == "int":
+            return {"type": "integer"}
+        elif type_name == "float":
+            return {"type": "number"}
+        elif type_name == "boolean":
+            return {"type": "boolean"}
+        elif type_name in ["id", "id!"]:
+            return {"type": "string"}
+        else:
+            # Generic scalar (DateTime, etc)
+            return {"type": "string", "description": f"GraphQL scalar: {str(gql_type)}"}
 
-            # Use docstring as description if available, otherwise use default
-            description = (
-                method.__doc__.strip() if method.__doc__ else f"GraphQL query: {query_name}"
+    # Handle Object types and Input Object types
+    if hasattr(gql_type, "fields"):
+        # Create an object type with properties
+        properties = {}
+        required = []
+
+        # Process each field
+        for field_name, field_value in gql_type.fields.items():
+            # Skip internal fields
+            if field_name.startswith("__"):
+                continue
+
+            # Get field type schema
+            field_schema = convert_type_to_json_schema(
+                field_value.type, max_depth, current_depth + 1
             )
+
+            # Check if field is required
+            is_required = field_schema.pop("required", False)
+            if is_required:
+                required.append(field_name)
+
+            # Add field schema to properties
+            properties[field_name] = field_schema
+
+        # Construct object schema
+        object_schema = {
+            "type": "object",
+            "properties": properties,
+        }
+
+        # Add required array if needed
+        if required:
+            object_schema["required"] = required
+
+        return object_schema
+
+    # Fallback for other types
+    type_name = str(gql_type)
+    logger.info(f"Unknown GraphQL type: {type_name}, using string fallback")
+    return {"type": "string", "description": f"Unknown GraphQL type: {type_name}"}
+
+
+def build_nested_selection(field_type: GraphQLObjectType, max_depth: int, current_depth: int = 1):
+    """Recursively build nested selections up to the specified depth."""
+    # Early return if max depth reached
+    if current_depth > max_depth:
+        return []
+
+    # Check if type is an Enum or other type without fields
+    if not hasattr(field_type, "fields"):
+        # For enum types or other types without fields, we can't select sub-fields
+        return []
+
+    selections = []
+    for field_name, field_value in field_type.fields.items():
+        # Skip internal fields (starting with __)
+        if field_name.startswith("__"):
+            continue
+        if isinstance(field_value.type, GraphQLScalarType):
+            selections.append((field_name, None))
+        elif isinstance(field_value.type, GraphQLNonNull):
+            of_type = field_value.type.of_type
+            # Check if field is a scalar
+            is_scalar = isinstance(of_type, GraphQLScalarType)
+            if is_scalar:
+                # Add scalar field to selections
+                selections.append((field_name, None))
+            else:
+                # Get the nested type
+                nested_type = field_value.type
+                # Handle non-null and list wrappers
+                while hasattr(nested_type, "of_type"):
+                    nested_type = nested_type.of_type
+
+                # Only add non-scalar fields with sub-selections
+                nested_selections = build_nested_selection(
+                    nested_type, max_depth, current_depth + 1
+                )
+                # Only add if it has valid nested selections
+                if nested_selections:
+                    selections.append((field_name, nested_selections))
+        elif isinstance(field_value.type, GraphQLList):
+            # Get the nested type
+            nested_type = field_value.type
+            # Handle non-null and list wrappers
+            while hasattr(nested_type, "of_type"):
+                nested_type = nested_type.of_type
+
+            # Only process if we actually have a GraphQLObjectType
+            if isinstance(nested_type, GraphQLObjectType):
+                nested_selections = build_nested_selection(
+                    nested_type, max_depth, current_depth + 1
+                )
+                # Only append if there are valid nested selections
+                if nested_selections:
+                    selections.append((field_name, nested_selections))
+        else:
+            # Get the nested type
+            nested_type = field_value.type
+            # Handle non-null and list wrappers
+            while hasattr(nested_type, "of_type"):
+                nested_type = nested_type.of_type
+
+            # Only process if we actually have a GraphQLObjectType
+            if isinstance(nested_type, GraphQLObjectType):
+                nested_selections = build_nested_selection(
+                    nested_type, max_depth, current_depth + 1
+                )
+                # Only append if there are valid nested selections
+                if nested_selections:
+                    selections.append((field_name, nested_selections))
+
+    return selections
+
+
+def build_selection(ds: DSLSchema, parent, selections):
+    result = []
+    for field_name, nested_selections in selections:
+        # Get the field
+        field = getattr(parent, field_name)
+
+        # Get the field type and handle wrapped types (List, NonNull)
+        field_type = field.field.type
+        # Unwrap NonNull and List types to get the inner type
+        while hasattr(field_type, "of_type"):
+            field_type = field_type.of_type
+
+        # Check if this is a scalar type or an object type
+        is_scalar = isinstance(field_type, GraphQLScalarType)
+
+        if nested_selections is None and is_scalar:
+            # This is a scalar field - can be selected directly
+            result.append(getattr(parent, field_name))
+        elif nested_selections and len(nested_selections) > 0:
+            # This is a non-scalar with valid nested selections
+            nested_fields = build_selection(ds, getattr(ds, field_type.name), nested_selections)
+            if nested_fields:
+                result.append(field.select(*nested_fields))
+        # Skip fields that have no valid nested selections and aren't scalars
+
+    return result
+
+
+async def list_tools_impl(_server: Server) -> list[Tool]:
+    try:
+        ctx = _server.request_context
+        ds: DSLSchema = ctx.lifespan_context["dsl_schema"]
+    except LookupError as e:
+        logger.info(f"Error al obtener el contexto: {e}")
+        # Configura el transporte
+        transport = AIOHTTPTransport(url="http://localhost:8080/graphql")
+
+        # Crea el cliente con fetch_schema_from_transport=True
+        client = Client(transport=transport, fetch_schema_from_transport=True)
+        async with client as session:
+            ds = DSLSchema(session.client.schema)
+    tools = []
+
+    # Establece la sesión del cliente
+    if ds:
+        # Accede al esquema dentro de la sesión
+        fields: dict[str, GraphQLField] = ds._schema.query_type.fields
+        for query_name, field in fields.items():
+            args_map: GraphQLArgumentMap = field.args
+            args_schema = {"type": "object", "properties": {}, "required": []}
+            for arg_name, arg in args_map.items():
+                logger.info(f"Converting GraphQL type for {arg_name}: {str(arg.type)}")
+                type_schema = convert_type_to_json_schema(arg.type, max_depth=3, current_depth=1)
+                # Remove the "required" flag which was used for tracking
+                is_required = type_schema.pop("required", False)
+
+                args_schema["properties"][arg_name] = type_schema
+                args_schema["properties"][arg_name]["description"] = (
+                    arg.description if arg.description else f"Argument {arg_name}"
+                )
+
+                # Mark as required if non-null and no default value
+                if (is_required or str(arg.type).startswith("!")) and not arg.default_value:
+                    args_schema["required"].append(arg_name)
+            logger.info(f"args_schema: {json.dumps(args_schema, indent=2)}")
 
             tools.append(
                 Tool(
                     name=query_name,
-                    description=description,
-                    inputSchema=schema,
+                    description=field.description
+                    if field.description
+                    else f"GraphQL query: {query_name}",
+                    inputSchema=args_schema,
                 ),
             )
 
     return tools
 
 
-# Un único handler para todas las herramientas GraphQL
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list:
-    """Execute a GraphQL query based on the tool name"""
-    # Importar dinámicamente las clases y funciones necesarias
-    from mcp_graphql.generate_from_json import load_graphql_schema
-    from mcp_graphql.graphql_client import GraphQLClient, GraphQLSchema
+async def call_tool_impl(_server: Server, name: str, arguments: dict) -> list:
+    ctx = _server.request_context
+    session = ctx.lifespan_context["session"]
+    # Don't use the session as a context manager, use it directly
+    ds: DSLSchema = ctx.lifespan_context["dsl_schema"]
+    fields: dict[str, GraphQLField] = ds._schema.query_type.fields
 
-    # Intentar cargar el schema con generate_schema si está disponible
-    schema_data = None
+    # Get query depth from arguments, default to 1 (flat)
+    max_depth = arguments.pop("depth", 3) if arguments else 1
     try:
-        # Primero intenta utilizar generate_schema.py si está disponible
-        # ya que tiene manejo de errores y recuperación más robustos
-        import mcp_graphql.generate_schema as generate_schema
+        max_depth = int(max_depth)
+    except (ValueError, TypeError):
+        max_depth = 1
+    logger.info(f"Llamando a la herramienta {name} con argumentos {arguments}")
+    if _query_name := next((_query_name for _query_name in fields if _query_name == name), None):
+        attr: DSLField = getattr(ds.Query, _query_name)
 
-        logger.info("Using generate_schema to fetch schema dynamically")
-        try:
-            schema_content = generate_schema.generate_schema(
-                endpoint_url="http://localhost:3010/graphql",
-                output_path=None,  # No guardar a archivo
-                verbose=False,
-                wrap_with_data=False,  # No envolver en data
-            )
-            # Envolver en el formato esperado por GraphQLSchema
-            schema_data = {"__schema": schema_content}
-            logger.info("Schema fetched dynamically")
-        except Exception as e:
-            logger.warning(f"Failed to fetch schema dynamically: {e!s}")
-    except ImportError:
-        logger.info("generate_schema module not available, checking for local schema file")
-        # Cargar el schema local si existe
-        import os
+        # Unwrap the type (NonNull, List) to get to the actual type name
+        field_type = attr.field.type
+        # Keep unwrapping until we find a type with a name attribute
+        while hasattr(field_type, "of_type") and not hasattr(field_type, "name"):
+            field_type = field_type.of_type
 
-        schema_path = "schema.json" if os.path.exists("schema.json") else None
-        if schema_path:
-            try:
-                # load_graphql_schema ya devuelve el contenido de __schema directamente
-                schema_content = load_graphql_schema(schema_path)
-                logger.info(f"Schema loaded from file: {schema_path}")
-                # Necesitamos usar directamente este contenido como self.schema, no como schema_dict
-                schema_data = {"__schema": schema_content}
-            except Exception as e:
-                logger.warning(f"Failed to load schema from file: {e!s}")
+        # Now we should have the actual type with a name
+        if not hasattr(field_type, "name"):
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Error: No se pudo determinar el tipo de retorno para {name}",
+                )
+            ]
 
-    # Crear el cliente GraphQL
-    graphql_client = GraphQLClient(url="http://localhost:3010/graphql")
-    if schema_data:
-        graphql_client.schema = GraphQLSchema(schema_dict=schema_data)
+        return_type: DSLType = getattr(ds, field_type.name)
 
-    # Obtener los métodos dinámicamente
-    # Importar la clase Query dinámicamente para no tener referencias directas
-    from importlib import import_module
-    from inspect import getmembers, isfunction
+        # Build the query with nested selections
+        selections = build_nested_selection(return_type._type, max_depth)
 
-    query_module = import_module("api_types")
-    Query = query_module.Query
+        # Build the actual query
+        query_selections = build_selection(ds, return_type, selections)
+        query = dsl_gql(DSLQuery(attr(**arguments).select(*query_selections)))
+        logger.info(f"query: {print_ast(query)}")
 
-    # Obtener todos los métodos de la clase Query
-    methods = {
-        method_name: method
-        for method_name, method in getmembers(Query, predicate=isfunction)
-        if not method_name.startswith("_")
-    }
+        #     # Execute the query
+        result = await session.execute(query)
+        return [types.TextContent(type="text", text=json.dumps(result))]
 
-    # Verificar si el nombre corresponde a un método de Query
-    if name not in methods:
-        return [TextContent(type="text", text=f"Unknown query: {name}")]
-
-    # Obtener el método a ejecutar
-    method = methods[name]
-    sig = inspect.signature(method)
-
-    if "args" not in sig.parameters:
-        return [TextContent(type="text", text=f"Method {name} does not accept args parameter")]
-
-    # Obtener el tipo de los argumentos
-    args_type = sig.parameters["args"].annotation
-
-    try:
-        # Crear instancia de los argumentos
-        args_instance = args_type(**arguments)
-
-        # Obtener las variables para la consulta
-        variables = args_instance.model_dump(by_alias=True) if args_instance else None
-
-        # Dejamos que el cliente genere los campos automáticamente
-        # sin hacer referencia a nombres específicos
-        result = graphql_client.execute_query(None, name, None, variables)
-
-        # Mostrar el resultado en formato texto
-        return [TextContent(type="text", text=f"Result for {name}: {result!s}")]
-    except Exception as e:
-        logger.error(f"Error executing {name} query: {e!s}", exc_info=True)
-        return [TextContent(type="text", text=f"Error executing {name} query: {e!s}")]
+    # Error case - tool not found
+    return [types.TextContent(type="text", text="No se encontró la herramienta")]
 
 
-async def run() -> None:
+async def serve(api_url: str, auth_headers: dict | None) -> None:
+    server = Server(
+        "mcp-graphql",
+        lifespan=partial(server_lifespan, api_url=api_url, auth_headers=auth_headers or {}),
+    )
+
+    server.list_tools()(functools.partial(list_tools_impl, server))
+    server.call_tool()(functools.partial(call_tool_impl, server))
+
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
             write_stream,
             InitializationOptions(
-                server_name="example",
+                server_name="mcp-graphql",
                 server_version="0.1.0",
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),
@@ -172,9 +352,3 @@ async def run() -> None:
                 ),
             ),
         )
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(run())
