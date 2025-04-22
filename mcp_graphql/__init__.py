@@ -1,6 +1,8 @@
-from .server import serve
-import click
 import json
+
+import click
+
+from .server import serve
 
 
 class JsonParamType(click.ParamType):
@@ -19,7 +21,7 @@ class JsonParamType(click.ParamType):
 @click.option("--api-url", type=str, required=True, help="URL of the GraphQL API")
 @click.option("--auth-token", type=str, help="Authentication token (optional)")
 @click.option(
-    "--auth-type", type=str, default="Bearer", help="Authentication type (Bearer, Basic, etc.)"
+    "--auth-type", type=str, default="Bearer", help="Authentication type (Bearer, Basic, etc.)",
 )
 @click.option(
     "--auth-headers",

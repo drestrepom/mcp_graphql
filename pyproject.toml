@@ -1,6 +1,6 @@
 [project]
 name = "mcp-graphql"
-version = "0.2.0"
+version = "0.3.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,8 +9,25 @@ dependencies = [
     "click>=8.1.8",
     "gql>=3.5.2",
     "mcp[cli]>=1.6.0",
-    "ruff>=0.11.5",
 ]
 
 [project.scripts]
 mcp-graphql = "mcp_graphql:main"
+
+[dependency-groups]
+dev = ["ruff>=0.11.5", "pyright>=1.1.399"]
+
+[tool.pyright]
+include = ["mcp_graphql"]
+exclude = ["**/__pycache__", "build", "dist"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingImports = true
+reportMissingTypeStubs = true
+useLibraryCodeForTypes = true
+stubPath = "typings"
+reportUnknownMemberType = false
+reportPrivateUsage = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportAttributeAccessIssue = false
