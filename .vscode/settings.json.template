@@ -1,0 +1,20 @@
+{
+  "[python]": {
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit"
+    },
+    "editor.rulers": [
+      100
+    ],
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.tabSize": 4
+  },
+  "mypy-type-checker.cwd": "$${workspaceFolder}",
+  "python.defaultInterpreterPath": "${PYTHON_INTERPRETER}",
+  "ruff.organizeImports": true,
+  "ruff.lineLength": 100,
+  "editor.formatOnSave": true,
+  "mypy-type-checker.args": ["--explicit-package-bases", "--config-file", "$${workspaceFolder}/mypy.ini"]
+}
