@@ -3,6 +3,7 @@ line-length = 100
 indent-width = 4
 target-version = "py311"
 exclude = []
+include = ["mcp_graphql/**/*.py", "mcp_graphql/*.py"]
 
 [lint]
 select = ["ALL"]
@@ -17,6 +18,7 @@ ignore = [
   "D102",
   "A005",
   "D",
+  "SLF001",
 ]
 fixable = ["ALL"]
 unfixable = []
