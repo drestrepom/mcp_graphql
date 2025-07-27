@@ -9,9 +9,14 @@ pkgs.writeShellApplication {
   text = ''
     pyproject_toml="pyproject.toml"
 
-    if ! git diff HEAD~1 HEAD -- "''${pyproject_toml}" | grep -q '^[-+]version'; then
-      echo "''${pyproject_toml} version has not changed. Skipping deployment." \
-        && return 0
+    # Determine previous revision if it exists (repository may have fewer than two commits)
+    prev_rev=$(git rev-parse --quiet --verify HEAD~1)
+
+    if [[ -n "''${prev_rev}" ]]; then
+      if ! git diff "''${prev_rev}" HEAD -- "''${pyproject_toml}" | grep -q '^[-+]version'; then
+        echo "''${pyproject_toml} version has not changed. Skipping deployment."
+        exit 0
+      fi
     fi
 
     set -o allexport
