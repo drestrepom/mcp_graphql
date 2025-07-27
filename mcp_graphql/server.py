@@ -3,7 +3,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
-from logging import INFO, basicConfig, getLogger
+from logging import INFO, WARNING, basicConfig, getLogger
 from typing import Any, cast
 
 from gql import Client
@@ -14,6 +14,8 @@ from graphql import (
     GraphQLArgumentMap,
     GraphQLEnumType,
     GraphQLField,
+    GraphQLInputField,
+    GraphQLInputObjectType,
     GraphQLInputType,
     GraphQLInterfaceType,
     GraphQLList,
@@ -50,6 +52,8 @@ basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = getLogger(__name__)
+# Silence INFO logs from the gql AIOHTTP transport
+getLogger("gql.transport.aiohttp").setLevel(WARNING)
 
 
 class UnknownGraphQLTypeError(Exception):
@@ -103,7 +107,7 @@ def _convert_scalar_to_json_schema(gql_scalar: GraphQLScalarType) -> JsonSchema:
     return {"type": "string", "description": f"GraphQL scalar: {gql_scalar!s}"}
 
 
-def convert_type_to_json_schema(
+def convert_type_to_json_schema(  # noqa: C901
     gql_type: GraphQLInputType | GraphQLArgument,
     max_depth: int = 3,
     current_depth: int = 1,
@@ -176,9 +180,19 @@ def convert_type_to_json_schema(
         schema = convert_type_to_json_schema(gql_type.type)
         if gql_type.description is not None:
             schema["description"] = gql_type.description
-
+    elif isinstance(gql_type, GraphQLInputObjectType):
+        schema = {
+            "type": "object",
+            "properties": {
+                field_name: convert_type_to_json_schema(field_type)
+                for field_name, field_type in gql_type.fields.items()
+            },
+        }
+    elif isinstance(gql_type, GraphQLInputField):
+        schema = convert_type_to_json_schema(gql_type.type)
     else:
         # Unknown / unsupported
+        logger.error("Unknown GraphQL type: %s", gql_type.__class__.__name__)
         raise UnknownGraphQLTypeError(gql_type)
 
     return schema
