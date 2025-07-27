@@ -3,13 +3,14 @@ pkgs.writeShellApplication {
   name = "mcp_graphql-deploy";
   runtimeInputs = pkgs.lib.flatten [
     pkgs.uv
+    pkgs.sops
     lib'.envs.default
   ];
   text = ''
     pyproject_toml="pyproject.toml"
 
     if ! git diff HEAD~1 HEAD -- "''${pyproject_toml}" | grep -q '^[-+]version'; then
-      : && info "''${pyproject_toml} version has not changed. Skipping deployment." \
+      echo "''${pyproject_toml} version has not changed. Skipping deployment." \
         && return 0
     fi
 

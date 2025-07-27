@@ -1,7 +1,7 @@
 [project]
 name = "mcp-graphql"
-version = "0.3.1"
-description = "Add your description here"
+version = "0.3.2"
+description = "MCP server for GraphQL"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
