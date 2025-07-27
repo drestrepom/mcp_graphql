@@ -191,9 +191,8 @@ def _process_nested_type(
     current_depth: int,
 ) -> ProcessedNestedType:
     """Process a nested type field."""
-    # Handle non-null and list wrappers
-    while hasattr(nested_type, "of_type"):
-        nested_type = nested_type.of_type
+    # Unwrap wrappers to get the concrete type
+    nested_type = _unwrap_wrapped_type(nested_type)
 
     # Only process if we actually have a GraphQLObjectType
     if isinstance(nested_type, GraphQLObjectType):
@@ -235,12 +234,8 @@ def build_nested_selection(
         if _should_skip_field(field_name, field_value):
             continue
 
-        # Unwrap NonNull for easier handling
-        value_type = (
-            field_value.type.of_type
-            if isinstance(field_value.type, GraphQLNonNull)
-            else field_value.type
-        )
+        # Determine the underlying GraphQL type (skip NonNull / List wrappers)
+        value_type = _unwrap_wrapped_type(field_value.type)
 
         # Scalars can be added directly
         if isinstance(value_type, GraphQLScalarType):
@@ -271,10 +266,7 @@ def build_selection(
         field = getattr(parent, field_name)
 
         # Get the field type and handle wrapped types (List, NonNull)
-        field_type = field.field.type
-        # Unwrap NonNull and List types to get the inner type
-        while hasattr(field_type, "of_type"):
-            field_type = field_type.of_type
+        field_type = _unwrap_wrapped_type(field.field.type)
 
         # Check if this is a scalar type or an object type
         is_scalar = isinstance(field_type, GraphQLScalarType)
@@ -284,7 +276,11 @@ def build_selection(
             result.append(getattr(parent, field_name))
         elif nested_selections and len(nested_selections) > 0:
             # This is a non-scalar with valid nested selections
-            nested_fields = build_selection(ds, getattr(ds, field_type.name), nested_selections)
+            nested_fields = build_selection(
+                ds,
+                getattr(ds, cast("Any", field_type).name),
+                nested_selections,
+            )
             if nested_fields:
                 result.append(field.select(*nested_fields))
         # Skip fields that have no valid nested selections and aren't scalars
@@ -378,9 +374,13 @@ async def call_tool_impl(
 
         # Unwrap the type (NonNull, List) to get to the actual type name
         field_type = attr.field.type
-        # Keep unwrapping until we find a type with a name attribute
-        while hasattr(field_type, "of_type") and not hasattr(field_type, "name"):
+        # Unwrap until we hit a type that exposes a ``name`` attribute
+        while not hasattr(field_type, "name") and hasattr(field_type, "of_type"):
+            # Access dynamically to appease static type checkers
             field_type = field_type.of_type
+
+        # Ensure we end up with the innermost, unwrapped type
+        field_type = _unwrap_wrapped_type(field_type)
 
         # Now we should have the actual type with a name
         if not hasattr(field_type, "name"):
@@ -391,7 +391,7 @@ async def call_tool_impl(
                 ),
             ]
 
-        return_type: DSLType = getattr(ds, field_type.name)
+        return_type: DSLType = getattr(ds, cast("Any", field_type).name)
 
         # Build the query with nested selections
         selections = build_nested_selection(return_type._type, max_depth)
@@ -460,3 +460,19 @@ async def serve(api_url: str, auth_headers: dict[str, str] | None) -> None:
                 ),
             ),
         )
+
+
+def _unwrap_wrapped_type(gql_type: Any) -> Any:  # noqa: ANN401
+    """Return the innermost GraphQL type.
+
+    GraphQL exposes wrapper types (``GraphQLNonNull``/``GraphQLList``) that add
+    an ``of_type`` attribute pointing at the underlying type.  For code that
+    needs the concrete type (e.g. to check whether it is a scalar/object) we
+    repeatedly follow that attribute until we reach a type that is not itself a
+    wrapper.  The parameter is typed as *Any* so static analysers do not shout
+    about the dynamic attribute access.
+    """
+
+    while hasattr(gql_type, "of_type"):
+        gql_type = gql_type.of_type
+    return gql_type
