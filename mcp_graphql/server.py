@@ -126,11 +126,14 @@ def convert_type_to_json_schema(  # noqa: C901
     if isinstance(gql_type, GraphQLNonNull):
         # Non-null wrapper
         schema = convert_type_to_json_schema(gql_type.of_type, max_depth, current_depth)
-        schema["required"] = True
-
     elif isinstance(gql_type, GraphQLList):
         # List wrapper
         inner_schema = convert_type_to_json_schema(gql_type.of_type, max_depth, current_depth)
+        logger.info(
+            "inner_schema: %s %s",
+            gql_type.of_type.__class__.__name__,
+            json.dumps(inner_schema, indent=2),
+        )
         schema = {"type": "array", "items": inner_schema}
 
     elif isinstance(gql_type, GraphQLScalarType):
@@ -138,19 +141,13 @@ def convert_type_to_json_schema(  # noqa: C901
         schema = _convert_scalar_to_json_schema(gql_type)
 
     elif isinstance(gql_type, GraphQLEnumType):
-        # Enumerations
-        values = [
-            {"const": value.value, "description": value.description}
-            for value in gql_type.values.values()
-        ]
-        schema = {"type": "string", "oneOf": values}
-
+        schema = {"enum": [value.value for value in gql_type.values.values()]}
     elif isinstance(gql_type, GraphQLObjectType):
         # Object with fields
         schema = {
             "type": "object",
             "properties": {
-                field_name: convert_type_to_json_schema(field_type)
+                field_name: convert_type_to_json_schema(field_type, max_depth, current_depth)
                 for field_name, field_type in gql_type.fields.items()
             },
             "required": [
@@ -165,7 +162,7 @@ def convert_type_to_json_schema(  # noqa: C901
         schema = {
             "type": "object",
             "properties": {
-                field_name: convert_type_to_json_schema(field_type)
+                field_name: convert_type_to_json_schema(field_type, max_depth, current_depth)
                 for field_name, field_type in gql_type.args.items()
             },
             "required": [
@@ -177,19 +174,24 @@ def convert_type_to_json_schema(  # noqa: C901
 
     elif isinstance(gql_type, GraphQLArgument):
         # Argument type (possibly with description)
-        schema = convert_type_to_json_schema(gql_type.type)
+        schema = convert_type_to_json_schema(gql_type.type, max_depth, current_depth)
         if gql_type.description is not None:
             schema["description"] = gql_type.description
     elif isinstance(gql_type, GraphQLInputObjectType):
         schema = {
             "type": "object",
             "properties": {
-                field_name: convert_type_to_json_schema(field_type)
+                field_name: convert_type_to_json_schema(field_type, max_depth, current_depth)
                 for field_name, field_type in gql_type.fields.items()
             },
+            "required": [
+                field_name
+                for field_name, field_type in gql_type.fields.items()
+                if isinstance(field_type.type, GraphQLNonNull)
+            ],
         }
     elif isinstance(gql_type, GraphQLInputField):
-        schema = convert_type_to_json_schema(gql_type.type)
+        schema = convert_type_to_json_schema(gql_type.type, max_depth, current_depth)
     else:
         # Unknown / unsupported
         logger.error("Unknown GraphQL type: %s", gql_type.__class__.__name__)
@@ -219,9 +221,6 @@ def _process_nested_type(
         if nested_selections:
             return (field_name, nested_selections)
     return (field_name, None)  # Return properly typed tuple instead of None
-
-
-# Helper to decide whether a field should be skipped when building selections
 
 
 def _should_skip_field(field_name: str, field_value: GraphQLField) -> bool:
@@ -306,7 +305,7 @@ def get_args_schema(args_map: GraphQLArgumentMap) -> JsonSchema:
     args_schema: JsonSchema = {"type": "object", "properties": {}, "required": []}
     for arg_name, arg in args_map.items():
         logger.debug("Converting GraphQL type for %s: %s", arg_name, arg.type)
-        type_schema = convert_type_to_json_schema(arg.type, max_depth=3, current_depth=1)
+        type_schema = convert_type_to_json_schema(arg.type, max_depth=5, current_depth=1)
         # Remove the "required" flag which was used for tracking
         is_required = type_schema.pop("required", False)
 
@@ -356,6 +355,7 @@ async def list_tools_impl(_server: Server[ServerContext]) -> list[Tool]:
             return_type_description = inspect(dsl_field.field.type)
             # Get the arguments schema for this field
             args_schema = get_args_schema(dsl_field.field.args)
+            logger.info("args_schema: %s", json.dumps(args_schema, indent=2))
             tools.append(
                 Tool(
                     name=query_name,
@@ -373,6 +373,7 @@ async def call_tool_impl(
     name: str,
     arguments: dict[str, Any],
 ) -> list[mcp_types.TextContent]:
+    logger.debug("calling tool %s with arguments %s", name, arguments)
     ctx = _server.request_context
     session = ctx.lifespan_context["session"]
     # Don't use the session as a context manager, use it directly
@@ -381,8 +382,8 @@ async def call_tool_impl(
         raise QueryTypeNotFoundError
     fields: dict[str, GraphQLField] = ds._schema.query_type.fields
 
-    max_depth = 3
-    logger.debug("Llamando a la herramienta %s con argumentos %s", name, arguments)
+    max_depth = 5
+    logger.debug("calling tool %s with arguments %s", name, arguments)
     if _query_name := next((_query_name for _query_name in fields if _query_name == name), None):
         attr: DSLField = getattr(ds.Query, _query_name)
 

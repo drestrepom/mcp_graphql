@@ -36,7 +36,7 @@ class JsonSchema(TypedDict, total=False):
     properties: dict[str, "JsonSchema"]
     required: bool | list[str]
     items: "JsonSchema"
-    oneOf: list[dict[str, str]] | None
+    enum: list[str]
 
 
 # Create simpler flattened definition for nested selections to avoid complex recursive types
