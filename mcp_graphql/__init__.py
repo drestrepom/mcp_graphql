@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import click
@@ -45,11 +46,17 @@ class JsonParamType(click.ParamType):
         'Custom authentication headers as JSON string (e.g. \'{"Authorization": "Bearer token", "X-API-Key": "key"}\')'  # noqa: E501
     ),
 )
+@click.option(
+    "--queries-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to a .gql file with predefined GraphQL queries (optional)",
+)
 def main(
     api_url: str,
     auth_token: str | None,
     auth_type: str,
     auth_headers: dict[str, Any] | None,
+    queries_file: Path | None,
 ) -> None:
     """MCP Graphql Server - Graphql server for MCP"""
 
@@ -62,9 +69,8 @@ def main(
     # Otherwise use auth_token and auth_type if provided
     elif auth_token:
         auth_headers_dict["Authorization"] = f"{auth_type} {auth_token}"
-    # If no auth is provided, proceed with empty headers
 
-    asyncio.run(serve(api_url, auth_headers_dict))
+    asyncio.run(serve(api_url, auth_headers_dict, queries_file=queries_file))
 
 
 if __name__ == "__main__":
