@@ -2,6 +2,7 @@ from typing import Any, TypedDict
 
 from gql.client import AsyncClientSession
 from gql.dsl import DSLSchema
+from graphql.language.ast import OperationDefinitionNode
 
 
 class ServerContext(TypedDict):
@@ -9,6 +10,11 @@ class ServerContext(TypedDict):
 
     session: AsyncClientSession
     dsl_schema: DSLSchema
+
+    # Optional mapping of query name -> GraphQL query string when the server is
+    # started with a predefined queries file.  When absent or empty, the server
+    # will fall back to exposing every query present in the remote schema.
+    predefined_queries: dict[str, OperationDefinitionNode] | None
 
 
 class SchemaRetrievalError(Exception):

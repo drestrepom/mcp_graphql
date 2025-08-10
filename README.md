@@ -64,7 +64,7 @@ python -m mcp_graphql --api-url="https://api.example.com/graphql" --auth-token="
 ### Available options
 
 - `--api-url`: GraphQL API URL (required)
-- `--auth-token`: Authentication token (optional)
+- `--auth-token`: Authentication token (optional, can also be set via `MCP_AUTH_TOKEN` environment variable)
 - `--auth-type`: Authentication type, default is "Bearer" (optional)
 - `--auth-headers`: Custom authentication headers in JSON format (optional)
 
@@ -168,6 +168,16 @@ uv sync
 ```bash
 ruff check .
 ```
+
+### Running the server in development mode
+
+When working locally you can start the MCP GraphQL server with hot-reloading and inspect its tools using the Model Context Protocol Inspector:
+
+```bash
+npx "@modelcontextprotocol/inspector" uv run -n --project $PWD mcp-graphql --api-url http://localhost:3010/graphql
+```
+
+Replace `http://localhost:3010/graphql` with the URL of your local GraphQL endpoint if it differs.
 
 ## License
 
