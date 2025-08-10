@@ -51,12 +51,25 @@ class JsonParamType(click.ParamType):
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Path to a .gql file with predefined GraphQL queries (optional)",
 )
-def main(
+@click.option(
+    "--queries",
+    type=str,
+    help="Predefined GraphQL queries as a string (optional)",
+)
+@click.option(
+    "--max-depth",
+    type=int,
+    default=5,
+    help="Maximum depth of the GraphQL query to generate (optional)",
+)
+def main(  # noqa: PLR0913
     api_url: str,
     auth_token: str | None,
     auth_type: str,
     auth_headers: dict[str, Any] | None,
     queries_file: Path | None,
+    queries: str | None,
+    max_depth: int,
 ) -> None:
     """MCP Graphql Server - Graphql server for MCP"""
 
@@ -70,7 +83,15 @@ def main(
     elif auth_token:
         auth_headers_dict["Authorization"] = f"{auth_type} {auth_token}"
 
-    asyncio.run(serve(api_url, auth_headers_dict, queries_file=queries_file))
+    asyncio.run(
+        serve(
+            api_url,
+            auth_headers_dict,
+            queries_file=queries_file,
+            queries=queries,
+            max_depth=max_depth,
+        ),
+    )
 
 
 if __name__ == "__main__":

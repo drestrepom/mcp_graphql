@@ -73,18 +73,29 @@ async def server_lifespan(
     api_url: str,
     auth_headers: dict[str, str],
     queries_file: Path | None = None,
+    queries: str | None = None,
 ) -> AsyncIterator[ServerContext]:
     """Manage server startup and shutdown lifecycle."""
     # Initialize resources on startup
     transport = AIOHTTPTransport(url=api_url, headers=auth_headers)
     client = Client(transport=transport, fetch_schema_from_transport=True)
     predefined_queries: dict[str, OperationDefinitionNode] = {}
-    # Use the client directly instead of trying to use session as a context manager
+    # Determine the source of predefined queries (file > string)
+    doc_src: str | None = None
+
     if queries_file and queries_file.exists():
         try:
             with queries_file.open(encoding="utf-8") as f:
                 doc_src = f.read()
+        except Exception:
+            logger.exception("Error reading predefined queries file")
+    elif queries:
+        # If provided directly as a string, use it
+        doc_src = queries
 
+    # Parse the document if we have any source
+    if doc_src:
+        try:
             # Parse the .gql document and extract every named operation
             doc = parse(doc_src)
 
@@ -98,7 +109,7 @@ async def server_lifespan(
                 op_name = definition.name.value
                 predefined_queries[op_name] = definition
         except Exception:
-            logger.exception("Error while parsing predefined queries file")
+            logger.exception("Error while parsing predefined queries")
 
     async with client as session:
         try:
@@ -135,7 +146,7 @@ def _convert_scalar_to_json_schema(gql_scalar: GraphQLScalarType) -> JsonSchema:
 
 def convert_type_to_json_schema(  # noqa: C901
     gql_type: GraphQLInputType | GraphQLArgument,
-    max_depth: int = 3,
+    max_depth: int = 5,
     current_depth: int = 1,
 ) -> JsonSchema:
     """
@@ -322,10 +333,10 @@ def build_selection(
     return result
 
 
-def get_args_schema(args_map: GraphQLArgumentMap) -> JsonSchema:
+def get_args_schema(args_map: GraphQLArgumentMap, max_depth: int = 5) -> JsonSchema:
     args_schema: JsonSchema = {"type": "object", "properties": {}, "required": []}
     for arg_name, arg in args_map.items():
-        type_schema = convert_type_to_json_schema(arg.type, max_depth=5, current_depth=1)
+        type_schema = convert_type_to_json_schema(arg.type, max_depth=max_depth, current_depth=1)
         # Remove the "required" flag which was used for tracking
         is_required = type_schema.pop("required", False)
 
@@ -344,7 +355,7 @@ def get_args_schema(args_map: GraphQLArgumentMap) -> JsonSchema:
     return args_schema
 
 
-async def list_tools_impl(_server: Server[ServerContext]) -> list[Tool]:
+async def list_tools_impl(_server: Server[ServerContext], max_depth: int = 5) -> list[Tool]:
     try:
         ctx = _server.request_context
         ds: DSLSchema = ctx.lifespan_context["dsl_schema"]
@@ -369,45 +380,59 @@ async def list_tools_impl(_server: Server[ServerContext]) -> list[Tool]:
 
     tools: list[Tool] = []
 
+    if not ds._schema.query_type:
+        raise QueryTypeNotFoundError
     # Determine which query names we should expose as tools
     if predefined_queries:
         query_names = list(predefined_queries.keys())
     else:
-        if not ds._schema.query_type:
-            raise QueryTypeNotFoundError
         query_names = list(ds._schema.query_type.fields.keys())
 
+    logger.info("number of query names: %s", len(query_names))
     # Iterate over the selected query names and build Tool objects
-    if ds and query_names:
-        if not ds._schema.query_type:
-            raise QueryTypeNotFoundError
-        fields: dict[str, GraphQLField] = ds._schema.query_type.fields
+    fields: dict[str, GraphQLField] = ds._schema.query_type.fields
+    if not ds or not ds._schema.query_type or not fields:
+        raise QueryTypeNotFoundError
 
-        for query_definition in predefined_queries.values():
-            # Skip if the query does not exist in the schema (e.g. mutation)
-            query_name = query_definition.selection_set.selections[0].to_dict()["name"]["value"]
-            if query_name not in fields:
-                continue
+    for query_definition in predefined_queries.values():
+        # Skip if the query does not exist in the schema (e.g. mutation)
+        query_name = query_definition.selection_set.selections[0].to_dict()["name"]["value"]
+        if query_name not in fields:
+            continue
 
-            field = fields[query_name]
-            dsl_field: DSLField = getattr(ds.Query, query_name)
-            return_type_description = inspect(dsl_field.field.type)
-            # Get the arguments schema for this field
-            args_schema = get_args_schema(dsl_field.field.args)
-            tools.append(
-                Tool(
-                    name=query_definition.name.value,  # type: ignore[union-attr]
-                    description=(field.description or f"GraphQL query: {query_name}")
-                    + f" (Returns: {return_type_description})",
-                    inputSchema=args_schema,  # type: ignore[arg-type]
-                ),
-            )
+        field = fields[query_name]
+        dsl_field: DSLField = getattr(ds.Query, query_name)
+        return_type_description = inspect(dsl_field.field.type)
+        # Get the arguments schema for this field
+        args_schema = get_args_schema(dsl_field.field.args, max_depth=max_depth)
+        tools.append(
+            Tool(
+                name=query_definition.name.value,  # type: ignore[union-attr]
+                description=(field.description or f"GraphQL query: {query_name}")
+                + f" (Returns: {return_type_description})",
+                inputSchema=args_schema,  # type: ignore[arg-type]
+            ),
+        )
+    for query_name, field in fields.items() if not predefined_queries else []:
+        dsl_field = getattr(ds.Query, query_name)
+        return_type_description = inspect(dsl_field.field.type)
+        # Get the arguments schema for this field
+        args_schema = get_args_schema(dsl_field.field.args, max_depth=max_depth)
+        tools.append(
+            Tool(
+                name=query_name,
+                description=(field.description or f"GraphQL query: {query_name}")
+                + f" (Returns: {return_type_description})",
+                inputSchema=args_schema,  # type: ignore[arg-type]
+            ),
+        )
 
     return tools
 
 
 async def call_tool_impl(
     _server: Server[ServerContext],
+    max_depth: int,
     name: str,
     arguments: dict[str, Any],
 ) -> list[mcp_types.TextContent]:
@@ -456,7 +481,6 @@ async def call_tool_impl(
             ),
         ]
 
-    max_depth = 5
     if _query_name := next((_query_name for _query_name in fields if _query_name == name), None):
         attr: DSLField = getattr(ds.Query, _query_name)
 
@@ -500,6 +524,8 @@ async def serve(
     api_url: str,
     auth_headers: dict[str, str] | None,
     queries_file: Path | None = None,
+    queries: str | None = None,
+    max_depth: int = 5,
 ) -> None:
     server = Server[ServerContext](
         "mcp-graphql",
@@ -508,11 +534,12 @@ async def serve(
             api_url=api_url,
             auth_headers=auth_headers or {},
             queries_file=queries_file,
+            queries=queries,
         ),
     )
 
-    server.list_tools()(functools.partial(list_tools_impl, server))
-    server.call_tool()(functools.partial(call_tool_impl, server))
+    server.list_tools()(functools.partial(list_tools_impl, server, max_depth))
+    server.call_tool()(functools.partial(call_tool_impl, server, max_depth))
 
     @server.list_resources()  # type: ignore[misc]
     async def list_resources_impl() -> list[Resource]:
