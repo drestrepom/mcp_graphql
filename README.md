@@ -152,7 +152,7 @@ query ListPosts {
 ```python
 import asyncio
 from pathlib import Path
-from mcp_graphql import serve
+from mcp_graphql import make_server, serve
 
 auth_headers = {"Authorization": "Bearer your-token"}
 api_url = "https://api.example.com/graphql"
@@ -172,6 +172,17 @@ query Hello($name: String!) {
 
 asyncio.run(serve(api_url, auth_headers, queries=queries_str, max_depth=3))
 ```
+
+Create low level MCP server:
+
+```python
+server = make_server(api_url, auth_headers, queries=queries_str, max_depth=3)
+```
+
+For low level server with Streamable HTTP implementations, see:
+
+- [Stateful server](https://github.com/modelcontextprotocol/python-sdk/tree/main/examples/servers/simple-streamablehttp)
+- [Stateless server](https://github.com/modelcontextprotocol/python-sdk/tree/main/examples/servers/simple-streamablehttp-stateless)
 
 ## Configuration
 
