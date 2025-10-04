@@ -520,13 +520,13 @@ async def call_tool_impl(
     return [mcp_types.TextContent(type="text", text="Tool not found")]
 
 
-async def serve(
+def make_server(
     api_url: str,
     auth_headers: dict[str, str] | None,
     queries_file: Path | None = None,
     queries: str | None = None,
     max_depth: int = 5,
-) -> None:
+) -> Server:
     server = Server[ServerContext](
         "mcp-graphql",
         lifespan=partial(
@@ -569,6 +569,24 @@ async def serve(
             name=type_name,
             description=print_type(ds._schema.type_map[type_name]),
         )
+
+    return server
+
+
+async def serve(
+    api_url: str,
+    auth_headers: dict[str, str] | None,
+    queries_file: Path | None = None,
+    queries: str | None = None,
+    max_depth: int = 5,
+) -> None:
+    server = make_server(
+        api_url,
+        auth_headers,
+        queries_file=queries_file,
+        queries=queries,
+        max_depth=max_depth,
+    )
 
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
